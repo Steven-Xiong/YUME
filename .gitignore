@@ -1,0 +1,16 @@
+*.mp4
+wandb
+outputs
+outputs_train_yume1.5_stage1
+outputs_train_yume1.5_stage23
+outputs_1.5
+outputs_train_yume1.5_stage1_lora_2.24
+outputs_train_yume1.5_stage1_lora_3.4
+outputs_train_yume1.5_stage1_lora_seadancev2_3.14
+outputs_train_yume1.5_stage1_3.4
+outputs_train_yume1.5_stage1_2.25
+Yume-5B-720P
+Yume-I2V-540P
+InternVL3-2B-Instruct
+ckpts
+data
