@@ -1087,7 +1087,7 @@ def main(args):
 
     # Create model:
     cfg = WAN_CONFIGS["ti2v-5B"]
-    ckpt_dir = "./Yume-5B-720P"
+    ckpt_dir = args.ckpt_dir
 
     # Referenced from https://github.com/Wan-Video/Wan2.1/blob/main/wan/image2video.py
     wan_i2v = wan23.Yume(
@@ -1312,12 +1312,6 @@ def main(args):
     # print dtype
     main_print(
         f"  Master weight dtype: {transformer.parameters().__next__().dtype}")
-
-    # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
-        assert NotImplementedError(
-            "resume_from_checkpoint is not supported now.")
-        # TODO
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -1880,6 +1874,12 @@ if __name__ == "__main__":
     parser.add_argument("--use_ema",
                         action="store_true",
                         help="Whether to use EMA.")
+    parser.add_argument(
+        "--ckpt_dir",
+        type=str,
+        default="./Yume-5B-720P",
+        help="Base checkpoint directory for TI2V-5B weights (Wan2.2 or Yume-5B-720P).",
+    )
     parser.add_argument("--t5_cpu", action="store_true",
                         help="Whether to place T5 model on CPU.")
     parser.add_argument("--use_wandb", action="store_true", help="Enable wandb logging.")

@@ -14,3 +14,6 @@ Yume-I2V-540P
 InternVL3-2B-Instruct
 ckpts
 data
+outputs_train_wan22-5b_stage1_seadancev3
+outputs_train_yume1.5_stage23_seadancev3
+outputs_train_yume1.5_stage1_lora_seadancev3_3.17

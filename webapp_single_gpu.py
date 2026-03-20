@@ -89,6 +89,8 @@ LOGGER.info("Log file: %s", LOG_PATH)
 # ------------------------- Paths & runtime options -----------------------
 CKPT_DIR = "./Yume-5B-720P"              # Wan checkpoint dir
 INTERNVL_PATH = "./InternVL3-2B-Instruct"  # InternVL dir
+# VLM backend: "internvl" (local model) or "gpt" (Azure OpenAI API)
+VLM_BACKEND = os.environ.get("VLM_BACKEND", "internvl")
 DEVICE_ID = 0                               # single GPU index
 DTYPE = torch.bfloat16                      # 全程 BF16
 OUTPUT_DIR = os.path.abspath("outputs")
@@ -153,6 +155,7 @@ class Models:
     # Caption
     caption_model: Optional[object] = None
     tokenizer: Optional[object] = None
+    gpt_client: Optional[object] = None  # used when VLM_BACKEND="gpt"
 
 MODELS = Models()
 WAN_READY = False
@@ -257,34 +260,57 @@ def load_wan() -> str:
 @torch.inference_mode()
 def load_caption_model() -> str:
     global CAP_READY
-    LOGGER.info("[load_caption_model] start (BF16)")
+    LOGGER.info("[load_caption_model] start (backend=%s)", VLM_BACKEND)
     t0 = time.perf_counter()
     if CAP_READY:
         LOGGER.info("[load_caption_model] already loaded.")
-        return "✅ InternVL 已加载（BF16）"
+        return f"✅ Caption 已加载（{VLM_BACKEND}）"
 
-    from transformers import AutoModel, AutoTokenizer
-    caption_model = AutoModel.from_pretrained(
-        INTERNVL_PATH,
-        torch_dtype=DTYPE,
-        low_cpu_mem_usage=True,
-        use_flash_attn=True,
-        trust_remote_code=True
-    ).eval()  # 先放 CPU
-    tokenizer = AutoTokenizer.from_pretrained(INTERNVL_PATH, trust_remote_code=True, use_fast=False)
+    if VLM_BACKEND == "gpt":
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'scripts', 'image_captioning'))
+        from gpt_caption import build_gpt_client
+        MODELS.gpt_client = build_gpt_client()
+        MODELS.caption_model = None
+        MODELS.tokenizer = None
+        CAP_READY = True
+        dt = time.perf_counter() - t0
+        LOGGER.info("[load_caption_model] GPT client ready in %.2fs", dt)
+        return f"✅ GPT Caption 已就绪  用时 {dt:.1f}s"
+    else:
+        from transformers import AutoModel, AutoTokenizer
+        caption_model = AutoModel.from_pretrained(
+            INTERNVL_PATH,
+            torch_dtype=DTYPE,
+            low_cpu_mem_usage=True,
+            use_flash_attn=True,
+            trust_remote_code=True
+        ).eval()  # 先放 CPU
+        tokenizer = AutoTokenizer.from_pretrained(INTERNVL_PATH, trust_remote_code=True, use_fast=False)
 
-    MODELS.caption_model = caption_model.cpu()
-    MODELS.tokenizer = tokenizer
-    CAP_READY = True
+        MODELS.caption_model = caption_model.cpu()
+        MODELS.tokenizer = tokenizer
+        CAP_READY = True
 
-    dt = time.perf_counter() - t0
-    LOGGER.info("[load_caption_model] OK in %.2fs", dt)
-    return f"✅ InternVL 已加载（BF16）  用时 {dt:.1f}s"
+        dt = time.perf_counter() - t0
+        LOGGER.info("[load_caption_model] OK in %.2fs", dt)
+        return f"✅ InternVL 已加载（BF16）  用时 {dt:.1f}s"
 
 # -------------------- Prompt 精炼（临时上 GPU，用完回 CPU） --------------------
 @torch.inference_mode()
 def refine_prompt_from_image(image_path: str, user_prompt: str) -> str:
-    if not CAP_READY or MODELS.caption_model is None:
+    if not CAP_READY:
+        return user_prompt
+    if VLM_BACKEND == "gpt":
+        try:
+            from gpt_caption import caption_image_gpt
+            question = (f"We want to generate a video using this prompt: \"{user_prompt}\". "
+                        "Please refine it for this image. Keep it one paragraph.")
+            return caption_image_gpt(MODELS.gpt_client, image_path=image_path, question=question) or user_prompt
+        except Exception as e:
+            LOGGER.exception("[caption] GPT refine failed: %s", e)
+            return user_prompt
+    if MODELS.caption_model is None:
         return user_prompt
     try:
         def dynamic_preprocess(image: Image.Image, min_num=1, max_num=12, image_size=448, use_thumbnail=True):

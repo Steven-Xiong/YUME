@@ -768,8 +768,11 @@ def sample_one(
     caption_path=None,
     camption_model=None,
     tokenizer=None,
+    gpt_client=None,
+    vlm_backend="internvl",
     t2v=False,
     prompt1=None,
+    MVDT=False,
 ):
     torch.cuda.empty_cache()
     torch.cuda.empty_cache()
@@ -801,7 +804,11 @@ def sample_one(
             question = '<image>\nWe want to generate a video using this prompt: \"'+prompt1+'\". Please modify and refine this prompt for the video of this image (<image>). Note that  \"'+prompt1+'\" must appear and revolve around the extension. Don\'t split it into points; just write a paragraph directly'
         #'<image>\nWe want to generate a video using this image. Please generate a prompt word for the video of this image. Don\'t split it into points; just write a paragraph directly' 
         
-        response = camption_model.chat(tokenizer, pixel_values, question, generation_config)
+        if vlm_backend == "gpt":
+            from gpt_caption import caption_image_gpt
+            response = caption_image_gpt(gpt_client, image_path=img_path, question=question.replace("<image>\n", ""))
+        else:
+            response = camption_model.chat(tokenizer, pixel_values, question, generation_config)
         pixel_values_ref_img = pixel_values_vid[0,:,:,:]
         caption = []
         #rot = "First-person perspective. The camera's movement direction remains stationary (·). The camera pans to the right (→). Actual distance moved:4 at 100 meters per second. Angular change rate (turn speed):0. View rotation speed:0."
@@ -851,11 +858,17 @@ def sample_one(
         #'<image>\nWe want to generate a video using this prompt: \"'+"The sun comes out."+'\". Please modify and refine this prompt for the video of this image (<image>). Note that "The sun comes out." must appear and revolve around the extension. Don\'t split it into points; just write a paragraph directly'
         #'<image>\nWe want to generate a video using this image. Please generate a prompt word for the video of this image. Don\'t split it into points; just write a paragraph directly' 
         pixel_values_ref_img = torch.nn.functional.interpolate(pixel_values_ref_img.unsqueeze(0).to(torch.bfloat16).to(device), size=(448, 448), mode='bilinear', align_corners=False)
-        response = camption_model.chat(tokenizer, pixel_values_ref_img, question, generation_config)
-
+        if vlm_backend == "gpt":
+            from gpt_caption import caption_image_gpt
+            # Use first frame path from dataset for GPT (pixel_values_ref_img is already loaded)
+            _idx = min((step-1)*world_size+rank, len(dataset_ddp)-1) if dataset_ddp is not None else (step-1)*world_size+rank
+            _img_path = dataset_ddp[_idx][2] if len(dataset_ddp[_idx]) > 2 else None
+            response = caption_image_gpt(gpt_client, image_path=_img_path, question=question.replace("<image>\n", "")) if _img_path else ""
+        else:
+            response = camption_model.chat(tokenizer, pixel_values_ref_img, question, generation_config)
 
         caption[0] = caption[0] \
-        + "Actual distance moved:4 at 100 meters per second. Angular change rate (turn speed):4. View rotation speed:4" + response
+        + "Actual distance moved:1 at 100 meters per second. Angular change rate (turn speed):4. View rotation speed:4" + response
         
 
         caption.append(caption[0])
@@ -919,24 +932,17 @@ def sample_one(
             video_all = []
             for step_sample in range(sample_num):
                 
-                # UniPC
-                # sample_scheduler = FlowUniPCMultistepScheduler(
-                #                 num_train_timesteps=1000,
-                #                 shift=1,
-                #                 use_dynamic_shifting=False)
-                # sample_scheduler.set_timesteps(
-                #                 num_euler_timesteps, device=device, shift=5.0)
-                # timesteps = sample_scheduler.timesteps
-                # seed = random.randint(0, sys.maxsize)
-                # seed_g = torch.Generator(device=device)
-                # seed_g.manual_seed(seed)
-
-                #c1,f1,h1,w1 = model_input.shape
-                # if t2v and step_sample == 0:
-                #     num_euler_timesteps_next = num_euler_timesteps
-                #     num_euler_timesteps = 14
-                # else:
-                #     num_euler_timesteps = num_euler_timesteps_next
+                if MVDT:
+                    sample_scheduler = FlowUniPCMultistepScheduler(
+                                    num_train_timesteps=1000,
+                                    shift=1,
+                                    use_dynamic_shifting=False)
+                    sample_scheduler.set_timesteps(
+                                    num_euler_timesteps, device=device, shift=5.0)
+                    timesteps = sample_scheduler.timesteps
+                    seed = random.randint(0, sys.maxsize)
+                    seed_g = torch.Generator(device=device)
+                    seed_g.manual_seed(seed)
 
                 sample_step = num_euler_timesteps
                 sampling_sigmas = get_sampling_sigmas(sample_step, 7.0)
@@ -957,81 +963,88 @@ def sample_one(
                 with torch.no_grad():
                     with torch.autocast("cuda", dtype=torch.bfloat16):
 
-                        for i in range(sample_step):
-                            latent_model_input = [latent.squeeze(0)]
+                        if MVDT:
+                            for ii, t in enumerate(timesteps):
+                                latent_model_input = [latent.squeeze(0)]
 
-                            if not t2v or step_sample>0:
-                               
-                                timestep = [sampling_sigmas[i]*1000]
-                                timestep = torch.tensor(timestep).to(device)
-                                temp_ts = (mask2[0][0][:-latent_frame_zero, ::2, ::2] ).flatten()
-                                temp_ts = torch.cat([
-                                    temp_ts,
-                                    temp_ts.new_ones(arg_c['seq_len'] - temp_ts.size(0)) * timestep
-                                ])
-                                timestep = temp_ts.unsqueeze(0)
+                                if not t2v or step_sample > 0:
+                                    timestep = [t]
+                                    timestep = torch.stack(timestep)
+                                    temp_ts = (mask2[0][0][:, ::2, ::2] * timestep).flatten()
+                                    temp_ts = torch.cat([
+                                        temp_ts,
+                                        temp_ts.new_ones(arg_c['seq_len'] - temp_ts.size(0)) * timestep
+                                    ])
+                                    timestep = temp_ts.unsqueeze(0)
 
-                                # # UniPC
-                                # timestep = [t]
-                                # timestep = torch.stack(timestep)
-                                # temp_ts = (mask2[0][0][:, ::2, ::2] * timestep).flatten()
-                                # temp_ts = torch.cat([
-                                #     temp_ts,
-                                #     temp_ts.new_ones(arg_c['seq_len'] - temp_ts.size(0)) * timestep
-                                # ])
-                                # timestep = temp_ts.unsqueeze(0)
+                                    noise_pred_cond = transformer(latent_model_input, t=timestep, flag=False, **arg_c)[0]
 
-                                print(latent_model_input[0].shape,"0-2=ffje0r=----------a")
-                                noise_pred_cond = transformer(latent_model_input, t=timestep, **arg_c)[0]
+                                    temp_x0 = sample_scheduler.step(
+                                                noise_pred_cond.unsqueeze(0),
+                                                t,
+                                                latent.unsqueeze(0),
+                                                return_dict=False,
+                                                generator=seed_g
+                                            )[0].squeeze(0)
+                                    temp_x0 = temp_x0[:, -latent_frame_zero:, :, :]
 
-                                if i+1 == sample_step:
-                                    temp_x0 = latent[:,-latent_frame_zero:,:,:] + (0-sampling_sigmas[i])*noise_pred_cond[:,-latent_frame_zero:,:,:]
                                 else:
-                                    temp_x0 = latent[:,-latent_frame_zero:,:,:] + (sampling_sigmas[i+1]-sampling_sigmas[i])*noise_pred_cond[:,-latent_frame_zero:,:,:]
+                                    timestep = [t]
+                                    timestep = torch.stack(timestep)
+                                    noise_pred_cond = transformer(latent_model_input, t=timestep, flag=False, **arg_c)[0]
 
-                                # # UniPC                                
-                                # print("w0a9w0j90weah", noise_pred_cond.unsqueeze(0).shape,t.shape,latent.unsqueeze(0).shape,"q11eq3rw31")
-                                # #w0a9w0j90weah torch.Size([1, 48, 8, 44, 80]) torch.Size([]) torch.Size([1, 48, 16, 44, 80]) q11eq3rw31
-                                # temp_x0 = sample_scheduler.step(
-                                #             noise_pred_cond[:,-latent_frame_zero:,:,:].unsqueeze(0),
-                                #             t,
-                                #             latent[:,-latent_frame_zero:,:,:].unsqueeze(0),
-                                #             return_dict=False,
-                                #             generator=seed_g
-                                #         )[0]
-                                # temp_x0 = temp_x0.squeeze()[:,-latent_frame_zero:,:,:]
+                                    temp_x0 = sample_scheduler.step(
+                                                noise_pred_cond.unsqueeze(0),
+                                                t,
+                                                latent.unsqueeze(0),
+                                                return_dict=False,
+                                                generator=seed_g
+                                            )[0].squeeze(0)
+                                    latent = temp_x0
 
-                            else:
-                                timestep = [sampling_sigmas[i]*1000]
-                                timestep = torch.tensor(timestep).to(device)
+                                if step_sample > 0:
+                                    latent = torch.cat([model_input_1[:,:-latent_frame_zero,:,:], temp_x0], dim=1)
+                                elif not t2v:
+                                    latent = torch.cat([model_input[:,:-latent_frame_zero,:,:], temp_x0], dim=1)
 
-                                # # UniPC
-                                # timestep = [t]
-                                # timestep = torch.stack(timestep)
-                                # temp_ts = timestep.flatten()
-                                # timestep = temp_ts#.unsqueeze(0)
-                                print(latent_model_input[0].shape,"0-2=ffje0r=----------a")
-                                noise_pred_cond = transformer(latent_model_input, t=timestep, flag=False, **arg_c)[0]
+                        else:
+                            for i in range(sample_step):
+                                latent_model_input = [latent.squeeze(0)]
 
-                                # # UniPC
-                                # temp_x0 = sample_scheduler.step(
-                                #             noise_pred_cond[:,-latent_frame_zero:,:,:].unsqueeze(0),
-                                #             t,
-                                #             latent[:,-latent_frame_zero:,:,:].unsqueeze(0),
-                                #             return_dict=False,
-                                #             generator=seed_g
-                                #         )[0].squeeze()
-                                # latent = temp_x0.squeeze()[:,-latent_frame_zero:,:,:]
+                                if not t2v or step_sample>0:
 
-                                if i+1 == sample_step:
-                                    latent = latent + (0-sampling_sigmas[i])*noise_pred_cond
+                                    timestep = [sampling_sigmas[i]*1000]
+                                    timestep = torch.tensor(timestep).to(device)
+                                    temp_ts = (mask2[0][0][:-latent_frame_zero, ::2, ::2] ).flatten()
+                                    temp_ts = torch.cat([
+                                        temp_ts,
+                                        temp_ts.new_ones(arg_c['seq_len'] - temp_ts.size(0)) * timestep
+                                    ])
+                                    timestep = temp_ts.unsqueeze(0)
+
+                                    noise_pred_cond = transformer(latent_model_input, t=timestep, **arg_c)[0]
+
+                                    if i+1 == sample_step:
+                                        temp_x0 = latent[:,-latent_frame_zero:,:,:] + (0-sampling_sigmas[i])*noise_pred_cond[:,-latent_frame_zero:,:,:]
+                                    else:
+                                        temp_x0 = latent[:,-latent_frame_zero:,:,:] + (sampling_sigmas[i+1]-sampling_sigmas[i])*noise_pred_cond[:,-latent_frame_zero:,:,:]
+
                                 else:
-                                    latent = latent + (sampling_sigmas[i+1]-sampling_sigmas[i])*noise_pred_cond
+                                    timestep = [sampling_sigmas[i]*1000]
+                                    timestep = torch.tensor(timestep).to(device)
 
-                            if step_sample > 0:
-                                latent = torch.cat([model_input_1[:,:-latent_frame_zero,:,:], temp_x0], dim=1)
-                            elif not t2v:
-                                latent = torch.cat([model_input[:,:-latent_frame_zero,:,:], temp_x0], dim=1)
+                                    print(latent_model_input[0].shape,"0-2=ffje0r=----------a")
+                                    noise_pred_cond = transformer(latent_model_input, t=timestep, flag=False, **arg_c)[0]
+
+                                    if i+1 == sample_step:
+                                        latent = latent + (0-sampling_sigmas[i])*noise_pred_cond
+                                    else:
+                                        latent = latent + (sampling_sigmas[i+1]-sampling_sigmas[i])*noise_pred_cond
+
+                                if step_sample > 0:
+                                    latent = torch.cat([model_input_1[:,:-latent_frame_zero,:,:], temp_x0], dim=1)
+                                elif not t2v:
+                                    latent = torch.cat([model_input[:,:-latent_frame_zero,:,:], temp_x0], dim=1)
 
                 end_time = time.time()
                 elapsed = end_time - start_time
@@ -1156,6 +1169,16 @@ def main(args):
         device_id=device,
     )  
     transformer = wan_i2v.model  
+
+    if args.MVDT:
+        from wan23.modules.model import WanAttentionBlock
+        transformer.sideblock = WanAttentionBlock(
+            transformer.dim, transformer.ffn_dim, transformer.num_heads,
+            transformer.window_size, transformer.qk_norm, transformer.cross_attn_norm, transformer.eps)
+        transformer.mask_token = torch.nn.Parameter(
+            torch.zeros(1, 1, transformer.dim))
+        torch.nn.init.normal_(transformer.mask_token, std=.02)
+
     transformer = transformer.eval().requires_grad_(False)
 
     if args.use_lora:
@@ -1308,14 +1331,25 @@ def main(args):
     step_times = deque(maxlen=100)
     #image_sample = True
     # If you want to load a model using multiple GPUs, please refer to the `Multiple GPUs` section.
-    path = 'InternVL3-2B-Instruct'
-    camption_model = AutoModel.from_pretrained(
-        path,
-        torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,
-        use_flash_attn=True,
-        trust_remote_code=True).eval().to(device)
-    tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True, use_fast=False)
+    gpt_client = None
+    camption_model = None
+    tokenizer = None
+    if args.vlm_backend == "gpt":
+        import sys as _sys, os as _os
+        _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '..', '..', 'scripts', 'image_captioning'))
+        from gpt_caption import build_gpt_client
+        gpt_client = build_gpt_client()
+        print("  Using GPT API for caption augmentation")
+    else:
+        path = 'InternVL3-2B-Instruct'
+        camption_model = AutoModel.from_pretrained(
+            path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            use_flash_attn=True,
+            trust_remote_code=True).eval().to(device)
+        tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True, use_fast=False)
+        print("  Using InternVL3 for caption augmentation")
 
     if args.prompt!=None:
         prompt1 = args.prompt
@@ -1350,8 +1384,11 @@ def main(args):
             caption_path = args.caption_path,
             camption_model = camption_model,
             tokenizer = tokenizer,
+            gpt_client = gpt_client,
+            vlm_backend = args.vlm_backend,
             t2v = args.T2V, #True,
             prompt1 = prompt1,
+            MVDT = args.MVDT,
         )
 
 
@@ -1372,6 +1409,9 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("--MVDT", action="store_true",
+                        help="Enable MVDT (sideblock + mask_token) for stage 2/3 checkpoints.")
+
     # dataset & dataloader
     parser.add_argument(
         "--train_batch_size",
@@ -1391,6 +1431,13 @@ if __name__ == "__main__":
     # validation & logs
     parser.add_argument("--validation_prompt_dir", type=str)
     parser.add_argument("--prompt", type=str)
+    parser.add_argument(
+        "--vlm_backend",
+        type=str,
+        default="internvl",
+        choices=["internvl", "gpt"],
+        help="VLM backend for caption augmentation: 'internvl' (local, default) or 'gpt' (Azure OpenAI API).",
+    )
     parser.add_argument("--seed",
                         type=int,
                         default=None,

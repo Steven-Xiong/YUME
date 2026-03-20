@@ -39,7 +39,7 @@ torchrun --nproc_per_node 8 --master_port 9607 \
     --train_batch_size=1 \
     --dataloader_num_workers 4 \
     --gradient_accumulation_steps=1 \
-    --max_train_steps=10000 \
+    --max_train_steps=1000 \
     --learning_rate=1e-5 \
     --discriminator_learning_rate=1e-5 \
     --mixed_precision="bf16" \
@@ -50,10 +50,13 @@ torchrun --nproc_per_node 8 --master_port 9607 \
     --Distil \
     --t5_cpu \
     --ckpt_dir="./Yume-5B-720P" \
-    --root_dir="/mnt/bn/voyager-sg-l3/zhexiao.xiong/zhexiao.xiong/data/veo3_yume_training_1000/mp4_frame" \
-    --full_mp4="/mnt/bn/voyager-sg-l3/zhexiao.xiong/zhexiao.xiong/data/veo3_yume_training_1000/Sekai/" \
-    --output_dir="outputs_train_yume1.5_stage23" \
-    --resume_from_checkpoint="ckpts/YUME/outputs_yume1.5/20260221_175548/checkpoint-3000" \
+    --root_dir="/mnt/bn/voyager-sg-l3/zhexiao.xiong/zhexiao.xiong/data/seadance2_yume_v3/mp4_frame" \
+    --full_mp4="/mnt/bn/voyager-sg-l3/zhexiao.xiong/zhexiao.xiong/data/seadance2_yume_v3//Sekai/" \
+    --output_dir="outputs_train_yume1.5_stage23_seadancev3" \
+    --resume_from_checkpoint="/mnt/bn/voyager-sg-l3/zhexiao.xiong/world_model/ckpts/YUME/outputs_yume1.5_stage1_lora_seadancev3/20260318_080459/lora-checkpoint-2000" \
     --use_wandb \
     --wandb_project="yume-stage23"
     # max train steps600000
+
+cd /mnt/bn/voyager-sg-l3/zhexiao.xiong
+python runner.py

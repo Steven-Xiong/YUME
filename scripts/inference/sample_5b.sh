@@ -45,3 +45,42 @@ torchrun --nproc_per_node 8 --master_port 9600 \
     # --jpg_dir="./jpg/" \
     #--jpg_dir="./jpg/" \
     #--video_root_dir "./test_video"
+
+### ── Stage 2/3 (full checkpoint, MVDT + Distil, 4 steps) ─────────────────
+## I2V
+# torchrun --nproc_per_node 8 --master_port 9600 \
+#     fastvideo/sample/sample_5b.py \
+#     --seed 43 \
+#     --gradient_checkpointing \
+#     --train_batch_size=1 \
+#     --max_sample_steps=600000 \
+#     --mixed_precision="bf16" \
+#     --allow_tf32 \
+#     --video_output_dir="./outputs/stage23_test" \
+#     --caption_path="./caption_re.txt" \
+#     --test_data_dir="./val" \
+#     --num_euler_timesteps 4 \
+#     --rand_num_img 0.6 \
+#     --MVDT \
+#     --jpg_dir="./jpg/" \
+#     --prompt "From a first-person perspective, grasp." \
+#     --resume_from_checkpoint "outputs_train_yume1.5_stage23/TIMESTAMP/checkpoint-STEP"
+
+## T2V
+# torchrun --nproc_per_node 8 --master_port 9600 \
+#     fastvideo/sample/sample_5b.py \
+#     --seed 43 \
+#     --gradient_checkpointing \
+#     --train_batch_size=1 \
+#     --max_sample_steps=600000 \
+#     --mixed_precision="bf16" \
+#     --allow_tf32 \
+#     --video_output_dir="./outputs/stage23_test" \
+#     --caption_path="./caption_re.txt" \
+#     --test_data_dir="./val" \
+#     --num_euler_timesteps 4 \
+#     --rand_num_img 0.6 \
+#     --MVDT \
+#     --T2V \
+#     --prompt "A stylish woman walks down a Tokyo street filled with warm glowing neon and animated city signage." \
+#     --resume_from_checkpoint "outputs_train_yume1.5_stage23/TIMESTAMP/checkpoint-STEP"

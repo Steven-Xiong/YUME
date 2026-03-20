@@ -258,22 +258,73 @@ import torch
 import gc 
 
 def resume_checkpoint(model, checkpoint_dir):
-    weight_path = os.path.join(checkpoint_dir,
-                               "diffusion_pytorch_model.safetensors")
+    """Load a checkpoint into the model, auto-detecting LoRA vs full format.
 
-    model_weights = load_file(weight_path)
+    For LoRA checkpoints (containing lora_config.json + adapter_model.bin):
+      loads the adapter, merges it into the base model, and returns the
+      merged full-parameter model.
+    For full checkpoints (containing diffusion_pytorch_model.safetensors):
+      loads the weights directly.
+    """
+    lora_config_path = os.path.join(checkpoint_dir, "lora_config.json")
+    full_weight_path = os.path.join(checkpoint_dir,
+                                    "diffusion_pytorch_model.safetensors")
 
+    if os.path.exists(lora_config_path):
+        from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
 
-    current_state = model.state_dict()
-    current_state.update(model_weights)
-    model.load_state_dict(current_state, strict=True)  # False
-    del current_state
-    torch.cuda.empty_cache()
-    torch.cuda.empty_cache()
-    gc.collect()
+        with open(lora_config_path, "r") as f:
+            lora_cfg = json.load(f)
 
-    step = int(checkpoint_dir.split("-")[-1])
-    return model, step
+        lora_params = lora_cfg["lora_params"]
+        step = lora_cfg["step"]
+
+        peft_config = LoraConfig(
+            r=lora_params["lora_rank"],
+            lora_alpha=lora_params["lora_alpha"],
+            target_modules=lora_params["target_modules"],
+            lora_dropout=0.0,
+            bias="none",
+        )
+
+        model = get_peft_model(model, peft_config)
+
+        adapter_path = os.path.join(checkpoint_dir, "adapter_model.bin")
+        adapter_weights = torch.load(adapter_path, map_location="cpu",
+                                     weights_only=False)
+        set_peft_model_state_dict(model, adapter_weights)
+        del adapter_weights
+
+        model = model.merge_and_unload()
+        model.requires_grad_(True)
+
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        main_print(f"--> Loaded and merged LoRA checkpoint from step {step}")
+        return model, step
+
+    elif os.path.exists(full_weight_path):
+        model_weights = load_file(full_weight_path)
+
+        current_state = model.state_dict()
+        current_state.update(model_weights)
+        model.load_state_dict(current_state, strict=True)
+        del current_state
+        torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        step = int(checkpoint_dir.split("-")[-1])
+        main_print(f"--> Loaded full checkpoint from step {step}")
+        return model, step
+
+    else:
+        raise FileNotFoundError(
+            f"No valid checkpoint found in {checkpoint_dir}. "
+            f"Expected 'lora_config.json' (LoRA) or "
+            f"'diffusion_pytorch_model.safetensors' (full)."
+        )
 
 import os
 import json

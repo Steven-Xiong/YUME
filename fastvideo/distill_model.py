@@ -767,12 +767,6 @@ def main(args):
     main_print(
         f"  Master weight dtype: {transformer.parameters().__next__().dtype}")
 
-    # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
-        assert NotImplementedError(
-            "resume_from_checkpoint is not supported now.")
-        # TODO
-
     progress_bar = tqdm(
         range(0, args.max_train_steps),
         initial=init_steps,

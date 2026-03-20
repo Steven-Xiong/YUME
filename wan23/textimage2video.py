@@ -33,9 +33,9 @@ from .utils.utils import best_output_size, masks_like
 from wan23.modules.model import WanAttentionBlock
 from fastvideo.utils.checkpoint import resume_checkpoint_yume
 import torch.nn.functional as F
-
 from safetensors.torch import load_file
 from copy import deepcopy
+import json
 def upsample_conv3d_weights(conv_small,size):
     old_weight = conv_small.weight.data 
     new_weight = F.interpolate(
@@ -141,7 +141,38 @@ class Yume:
             "text_len": 512
             }
 
+        single_file = os.path.join(checkpoint_dir, "diffusion_pytorch_model.safetensors")
+        index_file = os.path.join(checkpoint_dir, "diffusion_pytorch_model.safetensors.index.json")
+
         self.model = WanModel.from_config(config_wan)
+
+        if os.path.exists(single_file):
+            logging.info(f"Loading single-file checkpoint (Yume-5B): {single_file}")
+            state_dict = load_file(single_file)
+            self.model.load_state_dict(state_dict, strict=True)
+        elif os.path.exists(index_file):
+            logging.info(f"Loading sharded checkpoint (Wan2.2-TI2V-5B): {checkpoint_dir}")
+            with open(index_file, "r") as f:
+                shard_index = json.load(f)
+            shard_files = sorted(set(shard_index["weight_map"].values()))
+            state_dict = {}
+            for sf in shard_files:
+                shard_path = os.path.join(checkpoint_dir, sf)
+                logging.info(f"  loading shard: {sf}")
+                state_dict.update(load_file(shard_path))
+            missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+            if missing:
+                logging.info(f"Keys in model but not in Wan2.2 ckpt (will be initialized): {missing}")
+            if unexpected:
+                logging.warning(f"Unexpected keys in Wan2.2 ckpt: {unexpected}")
+        else:
+            raise FileNotFoundError(
+                f"No valid DiT checkpoint found in {checkpoint_dir}. "
+                f"Expected 'diffusion_pytorch_model.safetensors' (Yume-5B) or "
+                f"'diffusion_pytorch_model.safetensors.index.json' (Wan2.2-TI2V-5B)."
+            )
+        del state_dict
+
         self.model.patch_embedding_2x = upsample_conv3d_weights(deepcopy(self.model.patch_embedding),(1,4,4))
         self.model.patch_embedding_4x = upsample_conv3d_weights(deepcopy(self.model.patch_embedding),(1,8,8))
         self.model.patch_embedding_8x = upsample_conv3d_weights(deepcopy(self.model.patch_embedding),(1,16,16))
@@ -152,10 +183,6 @@ class Yume:
         self.model.mask_token = torch.nn.Parameter(
             torch.zeros(1, 1, self.model.dim, device=self.model.device)
         )
-
-        self.model = WanModel.from_pretrained(checkpoint_dir)
-        state_dict = load_file(checkpoint_dir+"/diffusion_pytorch_model.safetensors")
-        self.model.load_state_dict(state_dict)
 
 
         self.sp_size = 1
